@@ -1,0 +1,3 @@
+fastf1
+boto3
+pandas

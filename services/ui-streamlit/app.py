@@ -1,51 +1,54 @@
 import os
-import requests
 import streamlit as st
 from dotenv import load_dotenv
 
-# Load environment variables from .env (local dev)
+from client.replay_api_client import ReplayApiClient
+
 load_dotenv()
 
 REPLAY_API_BASE_URL = os.getenv("REPLAY_API_BASE_URL", "http://localhost:8000").rstrip("/")
-DEFAULT_SEASON = int(os.getenv("DEFAULT_SEASON", "2023"))
-DEFAULT_ROUND = int(os.getenv("DEFAULT_ROUND", "1"))
 
 st.set_page_config(page_title="F1 Replay Platform", layout="wide")
-
 st.title("F1 Replay Platform — Replay UI (Sprint 4)")
 
+# ---------------- Session State ----------------
+if "clock_state" not in st.session_state:
+    st.session_state.clock_state = None
+
+if "last_response" not in st.session_state:
+    st.session_state.last_response = None
+
+# ---------------- Sidebar ----------------
 with st.sidebar:
     st.header("Configuration")
-    st.caption("Local dev config is loaded from .env")
-
     api_base = st.text_input("Replay API Base URL", REPLAY_API_BASE_URL)
-    season = st.number_input("Season", min_value=1950, max_value=2100, value=DEFAULT_SEASON, step=1)
-    rnd = st.number_input("Round", min_value=1, max_value=30, value=DEFAULT_ROUND, step=1)
 
     st.divider()
     st.header("Clock Controls")
-    tick_seconds = st.number_input("Tick seconds", min_value=0.0, value=1.0, step=0.5)
+    tick_ms = st.number_input(
+        "Tick base_ms",
+        min_value=100,
+        value=1000,
+        step=100,
+        help="Passed directly to /clock/tick?base_ms="
+    )
 
-def _get(url: str, timeout: float = 10.0):
-    r = requests.get(url, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+client = ReplayApiClient(api_base)
 
-def _post(url: str, json_body=None, timeout: float = 10.0):
-    r = requests.post(url, json=json_body, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
-
+# ---------------- Layout ----------------
 col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("Clock State")
+
     if st.button("Refresh /clock/state"):
         try:
-            data = _get(f"{api_base.rstrip('/')}/clock/state")
-            st.json(data)
+            st.session_state.clock_state = client.get_clock_state()
         except Exception as e:
-            st.error(f"Failed to fetch clock state: {e}")
+            st.error(str(e))
+
+    if st.session_state.clock_state:
+        st.json(st.session_state.clock_state)
 
 with col2:
     st.subheader("Actions")
@@ -54,35 +57,35 @@ with col2:
     with c1:
         if st.button("Tick /clock/tick"):
             try:
-                data = _post(f"{api_base.rstrip('/')}/clock/tick", json_body={"seconds": float(tick_seconds)})
-                st.json(data)
+                st.session_state.last_response = client.tick_clock(tick_ms)
             except Exception as e:
-                st.error(f"Failed to tick clock: {e}")
+                st.error(str(e))
 
     with c2:
-        if st.button("Seek /clock/seek (0s)"):
+        if st.button("Seek /clock/seek (0 ms)"):
             try:
-                data = _post(f"{api_base.rstrip('/')}/clock/seek", json_body={"seconds": 0.0})
-                st.json(data)
+                st.session_state.last_response = client.seek_clock(0)
             except Exception as e:
-                st.error(f"Failed to seek clock: {e}")
+                st.error(str(e))
 
     with c3:
         if st.button("Fetch /replay/frame"):
             try:
-                # Assumption: replay service uses current clock state to determine frame
-                # and season/round are used as inputs to select dataset / metadata.
-                data = _get(f"{api_base.rstrip('/')}/replay/frame?season={int(season)}&round={int(rnd)}")
-                st.json(data)
+                st.session_state.last_response = client.get_replay_frame()
             except Exception as e:
-                st.error(f"Failed to fetch replay frame: {e}")
+                st.error(str(e))
+
+if st.session_state.last_response:
+    st.divider()
+    st.subheader("Last API Response")
+    st.json(st.session_state.last_response)
 
 st.divider()
 st.subheader("Notes")
 st.markdown(
     """
-- This UI is **user-driven** (no background timers).  
-- Frames are fetched **on demand** from the Replay API.  
-- Animation and track rendering will be added in next stories.
+- UI now matches Replay API contracts exactly.
+- No hidden parameters, no assumptions.
+- Deterministic behavior preserved.
 """
 )

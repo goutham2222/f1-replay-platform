@@ -1,91 +1,179 @@
 import os
+import requests
+import pandas as pd
 import streamlit as st
+import plotly.graph_objects as go
+import pyarrow.parquet as pq
+import pyarrow.fs as fs
 from dotenv import load_dotenv
 
-from client.replay_api_client import ReplayApiClient
-
+# --------------------------------------------------
+# Environment / Config
+# --------------------------------------------------
 load_dotenv()
 
-REPLAY_API_BASE_URL = os.getenv("REPLAY_API_BASE_URL", "http://localhost:8000").rstrip("/")
+CURATED_BUCKET = os.getenv("CURATED_BUCKET", "f1-replay-curated-goutham")
+TRACK_GEOMETRY_PREFIX = "track_geometry"
+REPLAY_API_BASE_URL = os.getenv("REPLAY_API_BASE_URL", "http://localhost:8000")
 
-st.set_page_config(page_title="F1 Replay Platform", layout="wide")
-st.title("F1 Replay Platform — Replay UI (Sprint 4)")
+st.set_page_config(
+    page_title="F1 Replay Platform — Track Replay",
+    layout="wide"
+)
 
-# ---------------- Session State ----------------
-if "clock_state" not in st.session_state:
-    st.session_state.clock_state = None
+# --------------------------------------------------
+# Sidebar Controls
+# --------------------------------------------------
+st.sidebar.header("Configuration")
 
-if "last_response" not in st.session_state:
-    st.session_state.last_response = None
+season = st.sidebar.number_input(
+    "Season",
+    min_value=2018,
+    max_value=2025,
+    value=2023,
+    step=1
+)
 
-# ---------------- Sidebar ----------------
-with st.sidebar:
-    st.header("Configuration")
-    api_base = st.text_input("Replay API Base URL", REPLAY_API_BASE_URL)
+round_no = st.sidebar.number_input(
+    "Round",
+    min_value=1,
+    max_value=30,
+    value=1,
+    step=1
+)
 
-    st.divider()
-    st.header("Clock Controls")
-    tick_ms = st.number_input(
-        "Tick base_ms",
-        min_value=100,
-        value=1000,
-        step=100,
-        help="Passed directly to /clock/tick?base_ms="
+load_track_btn = st.sidebar.button("Load Track Geometry")
+fetch_frame_btn = st.sidebar.button("Fetch Replay Frame")
+
+# --------------------------------------------------
+# Title
+# --------------------------------------------------
+st.title("F1 Replay Platform — Track Replay")
+
+# --------------------------------------------------
+# Load Track Geometry (Parquet from S3)
+# --------------------------------------------------
+@st.cache_data(show_spinner=False)
+def load_track_geometry(season: int, round_no: int) -> pd.DataFrame:
+    import pyarrow.dataset as ds
+
+    dataset = ds.dataset(
+        f"s3://{CURATED_BUCKET}/{TRACK_GEOMETRY_PREFIX}/",
+        format="parquet",
+        partitioning="hive"
     )
 
-client = ReplayApiClient(api_base)
+    table = dataset.to_table(
+        filter=(
+            (ds.field("season") == season)
+            & (ds.field("round") == round_no)
+        )
+    )
 
-# ---------------- Layout ----------------
-col1, col2 = st.columns([1, 1])
+    df = table.to_pandas()
 
-with col1:
-    st.subheader("Clock State")
+    if df.empty:
+        raise ValueError("No track geometry found")
 
-    if st.button("Refresh /clock/state"):
-        try:
-            st.session_state.clock_state = client.get_clock_state()
-        except Exception as e:
-            st.error(str(e))
+    return df.sort_values("point_index").reset_index(drop=True)
 
-    if st.session_state.clock_state:
-        st.json(st.session_state.clock_state)
+# --------------------------------------------------
+# Fetch Replay Frame (API)
+# --------------------------------------------------
+def fetch_replay_frame() -> dict:
+    resp = requests.get(f"{REPLAY_API_BASE_URL}/replay/frame", timeout=10)
+    resp.raise_for_status()
+    return resp.json()
 
-with col2:
-    st.subheader("Actions")
-    c1, c2, c3 = st.columns(3)
+# --------------------------------------------------
+# Session State
+# --------------------------------------------------
+if "track_df" not in st.session_state:
+    st.session_state.track_df = None
 
-    with c1:
-        if st.button("Tick /clock/tick"):
-            try:
-                st.session_state.last_response = client.tick_clock(tick_ms)
-            except Exception as e:
-                st.error(str(e))
+if "frame" not in st.session_state:
+    st.session_state.frame = None
 
-    with c2:
-        if st.button("Seek /clock/seek (0 ms)"):
-            try:
-                st.session_state.last_response = client.seek_clock(0)
-            except Exception as e:
-                st.error(str(e))
+# --------------------------------------------------
+# Load Track
+# --------------------------------------------------
+if load_track_btn:
+    with st.spinner("Loading track geometry..."):
+        st.session_state.track_df = load_track_geometry(season, round_no)
 
-    with c3:
-        if st.button("Fetch /replay/frame"):
-            try:
-                st.session_state.last_response = client.get_replay_frame()
-            except Exception as e:
-                st.error(str(e))
+    st.success(f"Loaded {len(st.session_state.track_df)} track points")
 
-if st.session_state.last_response:
-    st.divider()
-    st.subheader("Last API Response")
-    st.json(st.session_state.last_response)
+# --------------------------------------------------
+# Fetch Frame
+# --------------------------------------------------
+if fetch_frame_btn:
+    with st.spinner("Fetching replay frame..."):
+        st.session_state.frame = fetch_replay_frame()
 
-st.divider()
-st.subheader("Notes")
-st.markdown(
-    """
-- UI now matches Replay API contracts exactly.
-- No hidden parameters, no assumptions.
-- Deterministic behavior preserved.
-"""
-)
+# --------------------------------------------------
+# Render Track + Cars
+# --------------------------------------------------
+if st.session_state.track_df is not None:
+    df = st.session_state.track_df
+
+    # ---- Center track ----
+    x_centered = df["x"] - df["x"].mean()
+    y_centered = df["y"] - df["y"].mean()
+
+    fig = go.Figure()
+
+    # ---- Track line ----
+    fig.add_trace(
+        go.Scatter(
+            x=x_centered,
+            y=y_centered,
+            mode="lines",
+            line=dict(color="white", width=4),
+            hoverinfo="skip",
+            name="Track"
+        )
+    )
+
+
+    # ---- Cars (Replay Frame) ----
+    if st.session_state.frame is not None:
+        cars = st.session_state.frame.get("driver_states", [])
+
+        if cars:
+            car_df = pd.DataFrame(cars)
+
+            car_x = car_df["x"] - df["x"].mean()
+            car_y = car_df["y"] - df["y"].mean()
+
+            fig.add_trace(
+                go.Scatter(
+                    x=car_x,
+                    y=car_y,
+                    mode="markers+text",
+                    marker=dict(size=10, color="red"),
+                    text=car_df["driver_number"],
+                    textposition="top center",
+                    name="Cars"
+                )
+            )
+
+            st.caption(
+                f"Replay time: {st.session_state.frame.get('replay_time_ms', 0)} ms"
+            )
+
+    # ---- Layout ----
+    fig.update_layout(
+        showlegend=False,
+        paper_bgcolor="black",
+        plot_bgcolor="black",
+        margin=dict(l=0, r=0, t=0, b=0),
+    )
+
+    fig.update_xaxes(visible=False, scaleanchor="y")
+    fig.update_yaxes(visible=False)
+
+    st.subheader("Track Replay")
+    st.plotly_chart(fig, use_container_width=True)
+
+    with st.expander("Preview Track Data"):
+        st.dataframe(df.head(20), use_container_width=True)

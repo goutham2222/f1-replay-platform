@@ -25,6 +25,35 @@ class FrameBuilder:
         self.drivers = self.meta.load_drivers()
 
         # ----------------------------
+        # Load track geometry (static)
+        # ----------------------------
+        try:
+            track_df = self.reader.read_partitioned_table(
+                bucket=self.curated_bucket,
+                dataset="track_geometry",
+                season=self.season,
+                round=self.round,
+            )
+        except S3PartitionNotFound as e:
+            raise ValueError(
+                f"Track geometry not found for season={season}, round={round}"
+            ) from e
+
+        track_df = (
+            track_df
+            .sort_values("point_index")
+            .reset_index(drop=True)
+        )
+
+        if track_df.empty:
+            raise ValueError(
+                f"Empty track geometry for season={season}, round={round}"
+            )
+
+        self.track_points = track_df[["x", "y"]]
+        self.track_len = len(self.track_points)
+
+        # ----------------------------
         # Load curated lap times
         # ----------------------------
         try:
@@ -66,10 +95,20 @@ class FrameBuilder:
     # Continuous driver state (visual only)
     # -------------------------------------------------
     def _build_driver_states(self, replay_time_ms: int) -> list[dict]:
+        # Lap index starts at 1 as soon as time > 0
         completed_laps = replay_time_ms // AVERAGE_LAP_MS
         current_lap = min(int(completed_laps + 1), self.max_lap_number)
 
         lap_progress = (replay_time_ms % AVERAGE_LAP_MS) / AVERAGE_LAP_MS
+        lap_progress = max(0.0, min(1.0, lap_progress))
+
+        # Map lap_progress -> track point
+        # Use N-1 to keep index in range
+        point_idx = int(lap_progress * (self.track_len - 1))
+        point_idx = max(0, min(self.track_len - 1, point_idx))
+
+        x = float(self.track_points.iloc[point_idx]["x"])
+        y = float(self.track_points.iloc[point_idx]["y"])
 
         states = []
         for _, d in self.drivers.iterrows():
@@ -80,6 +119,8 @@ class FrameBuilder:
                 "team_name": d["team_name"],
                 "current_lap": current_lap,
                 "lap_progress": round(lap_progress, 3),
+                "x": x,
+                "y": y,
                 "state": f"Completing Lap {current_lap}",
             })
 
@@ -99,11 +140,11 @@ class FrameBuilder:
         )
 
     # -------------------------------------------------
-    # Public frame builder (THIS WAS MISSING)
+    # Public frame builder
     # -------------------------------------------------
     def build_frame(self, replay_time_ms: int) -> dict:
         # -------------------------------
-        # Pre-race
+        # Pre-race (no cars)
         # -------------------------------
         if replay_time_ms == 0:
             return {
@@ -143,7 +184,7 @@ class FrameBuilder:
             }
 
         # -------------------------------
-        # Normal race
+        # Normal race (cars visible)
         # -------------------------------
         laps = self._visible_completed_laps(clamped_time)
         driver_states = self._build_driver_states(clamped_time)

@@ -1,79 +1,119 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import List, Tuple, Optional
-
 import arcade
+from typing import List, Tuple
+import math
 
 from clients.arcade.s3_track_loader import load_track_from_s3
 
 
-@dataclass
-class _Transform:
-    scale: float
-    offset_x: float
-    offset_y: float
-
-
 class TrackRenderer:
+    TRACK_HALF_WIDTH = 6
+    UI_TOP_MARGIN = 120
+    SIDE_PADDING = 60
+    BOTTOM_PADDING = 60
+
     def __init__(self):
         self.points: List[Tuple[float, float]] = []
-        self._transform: Optional[_Transform] = None
+        self._transform = None
+        self.inner: List[Tuple[float, float]] = []
+        self.outer: List[Tuple[float, float]] = []
 
+    # -------------------------
+    # Data loading
+    # -------------------------
     def load_from_s3(self, bucket: str, season: int, round_: int):
-        self.points = load_track_from_s3(
-            bucket=bucket,
-            season=season,
-            round_=round_,
-            dataset="track_geometry",
-        )
-        self._transform = None  # recompute when we know window size
-
-    def fit_to_view(self, width: int, height: int, padding: int = 60):
+        self.points = load_track_from_s3(bucket, season, round_)
         if not self.points:
-            self._transform = _Transform(1.0, 0.0, 0.0)
-            return
+            raise ValueError("Empty track geometry")
 
+    # -------------------------
+    # Layout / transform
+    # -------------------------
+    def fit_to_view(self, window_width: float, window_height: float):
+        drawable_width = window_width - self.SIDE_PADDING * 2
+        drawable_height = (
+            window_height
+            - self.UI_TOP_MARGIN
+            - self.BOTTOM_PADDING
+        )
+
+        self._compute_transform(drawable_width, drawable_height)
+        self._build_boundaries()
+
+    def _compute_transform(self, drawable_w: float, drawable_h: float):
         xs = [p[0] for p in self.points]
         ys = [p[1] for p in self.points]
 
         min_x, max_x = min(xs), max(xs)
         min_y, max_y = min(ys), max(ys)
 
-        span_x = max(max_x - min_x, 1e-9)
-        span_y = max(max_y - min_y, 1e-9)
+        scale = min(
+            drawable_w / (max_x - min_x),
+            drawable_h / (max_y - min_y),
+        )
 
-        usable_w = max(width - 2 * padding, 10)
-        usable_h = max(height - 2 * padding, 10)
+        track_w = (max_x - min_x) * scale
+        track_h = (max_y - min_y) * scale
 
-        # Preserve aspect ratio: uniform scale
-        scale = min(usable_w / span_x, usable_h / span_y)
+        offset_x = (drawable_w - track_w) / 2 - min_x * scale + self.SIDE_PADDING
+        offset_y = (
+            self.BOTTOM_PADDING
+            + (drawable_h - track_h) / 2
+            - min_y * scale
+        )
 
-        # Center in view
-        track_cx = (min_x + max_x) / 2.0
-        track_cy = (min_y + max_y) / 2.0
-        screen_cx = width / 2.0
-        screen_cy = height / 2.0
+        self._transform = (scale, offset_x, offset_y)
 
-        offset_x = screen_cx - track_cx * scale
-        offset_y = screen_cy - track_cy * scale
+    def to_screen(self, x: float, y: float):
+        scale, ox, oy = self._transform
+        return x * scale + ox, y * scale + oy
 
-        self._transform = _Transform(scale=scale, offset_x=offset_x, offset_y=offset_y)
+    # -------------------------
+    # Geometry
+    # -------------------------
+    def _build_boundaries(self):
+        n = len(self.points)
+        inner = []
+        outer = []
 
-    def to_screen(self, x: float, y: float) -> Tuple[float, float]:
-        if self._transform is None:
-            # Safe default (won't freeze). Main window will call fit_to_view() early.
-            return x, y
-        t = self._transform
-        return (x * t.scale + t.offset_x, y * t.scale + t.offset_y)
+        for i in range(n):
+            p_prev = self.points[i - 1]
+            p_curr = self.points[i]
+            p_next = self.points[(i + 1) % n]
 
+            dx = p_next[0] - p_prev[0]
+            dy = p_next[1] - p_prev[1]
+            length = math.hypot(dx, dy)
+            if length == 0:
+                continue
+
+            nx = -dy / length
+            ny = dx / length
+
+            ix = p_curr[0] - nx * self.TRACK_HALF_WIDTH
+            iy = p_curr[1] - ny * self.TRACK_HALF_WIDTH
+            ox = p_curr[0] + nx * self.TRACK_HALF_WIDTH
+            oy = p_curr[1] + ny * self.TRACK_HALF_WIDTH
+
+            inner.append(self.to_screen(ix, iy))
+            outer.append(self.to_screen(ox, oy))
+
+        self.inner = inner
+        self.outer = outer
+
+    # -------------------------
+    # Rendering
+    # -------------------------
     def draw(self):
-        if not self.points:
+        if not self.inner:
             return
-        if self._transform is None:
-            # If fit_to_view() wasn’t called yet, we still draw raw (debug)
-            pts = self.points
-        else:
-            pts = [self.to_screen(x, y) for (x, y) in self.points]
 
-        arcade.draw_line_strip(pts, arcade.color.WHITE, 2)
+        arcade.draw_line_strip(
+            self.outer + [self.outer[0]],
+            arcade.color.LIGHT_GRAY,
+            3,
+        )
+        arcade.draw_line_strip(
+            self.inner + [self.inner[0]],
+            arcade.color.GRAY,
+            3,
+        )

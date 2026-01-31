@@ -1,140 +1,179 @@
 from __future__ import annotations
 
+import threading
+import time
+from typing import Optional
+
 import arcade
 
-from clients.arcade.config import load_config
-from clients.arcade.replay_api import ReplayApiClient
+from clients.arcade.config import settings
+from clients.arcade.track import TrackRenderer
+from clients.arcade.driver import DriverDot
+from clients.arcade.colors import get_driver_color
+from clients.arcade.replay_api_client import ReplayAPIClient
 
 
-class ArcadeApp(arcade.Window):
+class FramePoller:
     """
-    Minimal Arcade window for F1RP-56.
-
-    Responsibilities:
-    - Open a local Arcade window
-    - Prove connectivity to Replay API (read-only)
-    - Render basic status text
-
-    Explicitly NOT responsible for:
-    - Replay logic
-    - Timing / animation control
-    - Frame interpolation
+    Background poller so the UI thread never blocks on HTTP.
     """
 
-    def __init__(self, replay_client: ReplayApiClient, width: int, height: int, title: str) -> None:
-        super().__init__(width=width, height=height, title=title, resizable=True)
-        self._replay_client = replay_client
+    def __init__(self, client: ReplayAPIClient, poll_hz: float = 10.0):
+        self.client = client
+        self.poll_s = max(1.0 / poll_hz, 0.05)
 
-        # UI-only state (allowed)
-        self._clock_state: dict | None = None
-        self._error: str | None = None
+        self._lock = threading.Lock()
+        self._latest_frame: Optional[dict] = None
+        self._latest_error: Optional[str] = None
 
-    def setup(self) -> None:
-        """
-        One-time setup.
-        Perform a read-only call to confirm API connectivity.
-        """
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+
+    def get_latest(self) -> tuple[Optional[dict], Optional[str]]:
+        with self._lock:
+            return self._latest_frame, self._latest_error
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                frame = self.client.get_frame()
+                with self._lock:
+                    self._latest_frame = frame
+                    self._latest_error = None
+            except Exception as e:
+                with self._lock:
+                    self._latest_error = str(e)
+            time.sleep(self.poll_s)
+
+
+class ArcadeClient(arcade.Window):
+    def __init__(self, track_renderer: TrackRenderer):
+        super().__init__(
+            width=settings.WINDOW_WIDTH,
+            height=settings.WINDOW_HEIGHT,
+            title=settings.WINDOW_TITLE,
+        )
+
+        arcade.set_background_color(arcade.color.BLACK)
+
+        self.track_renderer = track_renderer
+        self.track_renderer.fit_to_view(self.width, self.height, padding=70)
+
+        self.replay_client = ReplayAPIClient(settings.REPLAY_API_BASE_URL, timeout_s=0.5)
+        self.poller = FramePoller(self.replay_client, poll_hz=10.0)
+        self.poller.start()
+
+        self.drivers: dict[str, DriverDot] = {}
+        self.driver_order: list[str] = []  # stable color assignment
+
+        self.last_frame: Optional[dict] = None
+        self.last_error: Optional[str] = None
+
+    def on_close(self):
         try:
-            self._clock_state = self._replay_client.get_clock_state()
-            self._error = None
-        except Exception as exc:  # UI boundary
-            self._clock_state = None
-            self._error = str(exc)
+            self.poller.stop()
+        finally:
+            super().on_close()
 
-    def on_draw(self) -> None:
+    def on_resize(self, width: int, height: int):
+        super().on_resize(width, height)
+        self.track_renderer.fit_to_view(width, height, padding=70)
+
+    def on_update(self, delta_time: float):
+        # No I/O here. Just read latest cached result.
+        frame, err = self.poller.get_latest()
+        if frame is not None:
+            self.last_frame = frame
+        self.last_error = err
+
+    def on_draw(self):
         arcade.start_render()
 
-        x = 20
-        y = self.height - 30
-        line = 22
+        self.track_renderer.draw()
+        self._draw_header()
+        self._draw_drivers()
 
+    def _draw_header(self):
+        y = self.height - 30
         arcade.draw_text(
             "F1 Replay Platform — Arcade Client",
-            x, y,
-            arcade.color.WHITE,
-            font_size=18,
-        )
-
-        y -= line * 2
-        arcade.draw_text(
-            f"Replay API: {self._replay_client.base_url}",
-            x,
+            20,
             y,
-            arcade.color.LIGHT_GRAY,
-            font_size=14,
+            arcade.color.WHITE,
+            18,
         )
 
-        y -= line * 2
+        y -= 26
+        api_line = f"Replay API: {settings.REPLAY_API_BASE_URL}"
+        arcade.draw_text(api_line, 20, y, arcade.color.GRAY, 12)
 
-        if self._error:
+        y -= 22
+        if self.last_error:
+            arcade.draw_text(f"Replay API status: ERROR ({self.last_error})", 20, y, arcade.color.RED, 12)
+        else:
+            arcade.draw_text("Replay API status: OK", 20, y, arcade.color.GREEN, 12)
+
+        if self.last_frame and "replay_time_ms" in self.last_frame:
+            y -= 22
             arcade.draw_text(
-                "Replay API status: ERROR",
-                x,
+                f"replay_time_ms: {self.last_frame.get('replay_time_ms')}",
+                20,
                 y,
-                arcade.color.RED,
-                font_size=14,
+                arcade.color.WHITE,
+                12,
             )
-            y -= line
-            arcade.draw_text(
-                self._error,
-                x,
-                y,
-                arcade.color.RED,
-                font_size=12,
-                width=self.width - 40,
-                multiline=True,
-            )
+
+    def _color_for_driver(self, driver_id: str) -> DriverDot:
+        if driver_id not in self.drivers:
+            if driver_id not in self.driver_order:
+                self.driver_order.append(driver_id)
+            idx = self.driver_order.index(driver_id)
+            self.drivers[driver_id] = DriverDot(color=get_driver_color(idx))
+        return self.drivers[driver_id]
+
+    def _draw_drivers(self):
+        if not self.last_frame:
             return
 
-        arcade.draw_text(
-            "Replay API status: OK",
-            x,
-            y,
-            arcade.color.GREEN,
-            font_size=14,
-        )
+        states = self.last_frame.get("driver_states", [])
+        if not isinstance(states, list):
+            return
 
-        y -= line
+        for state in states:
+            if not isinstance(state, dict):
+                continue
+            if "driver_id" not in state or "x" not in state or "y" not in state:
+                continue
 
-        if isinstance(self._clock_state, dict):
-            arcade.draw_text(
-                f"/clock/state keys: {', '.join(sorted(self._clock_state.keys()))}",
-                x,
-                y,
-                arcade.color.LIGHT_GRAY,
-                font_size=12,
-                width=self.width - 40,
-                multiline=True,
-            )
+            driver_id = state["driver_id"]
+            dot = self._color_for_driver(driver_id)
 
-    def on_key_press(self, symbol: int, modifiers: int) -> None:
-        """
-        Temporary utility:
-        - Press 'R' to re-fetch /clock/state
-        """
-        if symbol == arcade.key.R:
-            try:
-                self._clock_state = self._replay_client.get_clock_state()
-                self._error = None
-            except Exception as exc:
-                self._clock_state = None
-                self._error = str(exc)
+            screen_x, screen_y = self.track_renderer.to_screen(float(state["x"]), float(state["y"]))
+            dot.draw(screen_x, screen_y)
 
 
-def main() -> None:
-    cfg = load_config()
-
-    replay_client = ReplayApiClient(
-        base_url=cfg.replay_api_base_url,
+def main():
+    # -------------------------------
+    # BLOCKING I/O: do it BEFORE UI
+    # -------------------------------
+    track_renderer = TrackRenderer()
+    track_renderer.load_from_s3(
+        bucket=settings.CURATED_BUCKET,
+        season=settings.SEASON,
+        round_=settings.ROUND,
     )
 
-    window = ArcadeApp(
-        replay_client=replay_client,
-        width=cfg.window_width,
-        height=cfg.window_height,
-        title=cfg.window_title,
-    )
-    window.setup()
+    # -------------------------------
+    # UI starts after data ready
+    # -------------------------------
+    ArcadeClient(track_renderer)
     arcade.run()
 
 

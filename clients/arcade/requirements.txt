@@ -2,3 +2,6 @@ arcade==2.6.17
 requests==2.32.3
 python-dotenv==1.0.1
 Pillow>=10.2.0
+s3fs
+pyarrow
+pandas

@@ -1,61 +1,38 @@
-from __future__ import annotations
-
-import os
 from dataclasses import dataclass
-from dotenv import load_dotenv
+import os
+
+try:
+    # Optional; safe if not installed
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
+
+
+def _env_int(key: str, default: int) -> int:
+    v = os.getenv(key)
+    return default if v is None or v.strip() == "" else int(v)
+
+
+def _env_str(key: str, default: str) -> str:
+    v = os.getenv(key)
+    return default if v is None or v.strip() == "" else v
 
 
 @dataclass(frozen=True)
-class ArcadeConfig:
-    """
-    Immutable configuration for the Arcade visualization client.
+class Settings:
+    # Window
+    WINDOW_WIDTH: int = _env_int("ARCADE_WINDOW_WIDTH", 1400)
+    WINDOW_HEIGHT: int = _env_int("ARCADE_WINDOW_HEIGHT", 800)
+    WINDOW_TITLE: str = _env_str("ARCADE_WINDOW_TITLE", "F1 Replay Platform — Arcade Client")
 
-    Rules:
-    - Loaded once at startup
-    - No runtime mutation
-    - No replay logic here
-    """
+    # Replay API
+    REPLAY_API_BASE_URL: str = _env_str("REPLAY_API_BASE_URL", "http://localhost:8000")
 
-    replay_api_base_url: str
-    window_width: int
-    window_height: int
-    window_title: str
+    # S3 curated dataset
+    CURATED_BUCKET: str = _env_str("CURATED_BUCKET", "f1-replay-curated-goutham")
+    SEASON: int = _env_int("SEASON", 2023)
+    ROUND: int = _env_int("ROUND", 1)
 
 
-def load_config() -> ArcadeConfig:
-    """
-    Load configuration from environment variables.
-
-    Priority:
-    1. clients/arcade/.env (if present)
-    2. Process environment
-
-    Required:
-    - REPLAY_API_BASE_URL
-    """
-
-    # Load .env if it exists (safe no-op otherwise)
-    load_dotenv()
-
-    replay_api_base_url = os.getenv("REPLAY_API_BASE_URL")
-    if not replay_api_base_url:
-        raise RuntimeError(
-            "REPLAY_API_BASE_URL is required. "
-            "Set it in clients/arcade/.env or as an environment variable."
-        )
-
-    replay_api_base_url = replay_api_base_url.rstrip("/")
-
-    window_width = int(os.getenv("ARCADE_WINDOW_WIDTH", "1280"))
-    window_height = int(os.getenv("ARCADE_WINDOW_HEIGHT", "720"))
-    window_title = os.getenv(
-        "ARCADE_WINDOW_TITLE",
-        "F1 Replay Platform — Arcade Client",
-    )
-
-    return ArcadeConfig(
-        replay_api_base_url=replay_api_base_url,
-        window_width=window_width,
-        window_height=window_height,
-        window_title=window_title,
-    )
+settings = Settings()

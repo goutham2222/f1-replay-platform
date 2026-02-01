@@ -6,6 +6,7 @@ from clients.arcade.driver import DriverDot
 from clients.arcade.colors import get_team_color
 from clients.arcade.config import settings
 from clients.arcade.selector import ReplaySelector
+from clients.arcade.leaderboard import LeaderboardRenderer
 
 BACKGROUND_COLOR = arcade.color.BLACK
 TARGET_FPS = 60
@@ -45,11 +46,14 @@ class F1ReplayApp(arcade.Window):
         # CLIENT INTENT (authoritative for ticking)
         self.client_playing = False
 
+        # Leaderboard (render-only)
+        self.leaderboard = LeaderboardRenderer()
+
         self.ui_race_time_hms = "00:00:00"
         self.last_api_error = None
 
     # ==========================================================
-    # Update (INTENT-DRIVEN, SAFE)
+    # Update (UNCHANGED CONTROL FLOW)
     # ==========================================================
     def on_update(self, delta_time: float):
         if self.selector.active:
@@ -60,7 +64,6 @@ class F1ReplayApp(arcade.Window):
             return
 
         try:
-            # Always fetch state
             self.clock_state = self.api.get_clock_state()
             self.ui_race_time_hms = self.clock_state["current_time_hms"]
 
@@ -72,6 +75,12 @@ class F1ReplayApp(arcade.Window):
                     self.clock_state = self.api.get_clock_state()
 
             frame = self.api.get_frame()
+
+            # 🔹 Leaderboard update (frame-only)
+            self.leaderboard.update_from_frame(
+                frame.get("driver_states", []),
+                self.clock_state["current_time_ms"],
+            )
 
             for d in frame.get("driver_states", []):
                 driver_id = d["driver_id"]
@@ -154,6 +163,12 @@ class F1ReplayApp(arcade.Window):
             14,
         )
 
+        # 🔹 Leaderboard (right side)
+        self.leaderboard.draw(
+            x=self.width - 420,
+            y=self.height - 80,
+        )
+
         if self.last_api_error:
             arcade.draw_text(
                 f"API error: {self.last_api_error}",
@@ -170,9 +185,8 @@ class F1ReplayApp(arcade.Window):
             arcade.color.GRAY,
             12,
         )
-
     # ==========================================================
-    # Input (IMMEDIATE INTENT)
+    # Input (UNCHANGED)
     # ==========================================================
     def on_key_press(self, symbol: int, modifiers: int):
         if self.selector.active:

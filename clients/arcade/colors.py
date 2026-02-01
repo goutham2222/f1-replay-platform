@@ -1,7 +1,7 @@
 import arcade
 
 TEAM_COLORS = {
-    "Red Bull": arcade.color.DARK_BLUE,
+    "Red Bull Racing": arcade.color.DARK_BLUE,
     "Ferrari": arcade.color.RED,
     "Mercedes": arcade.color.SILVER,
     "McLaren": arcade.color.ORANGE,
@@ -10,9 +10,24 @@ TEAM_COLORS = {
     "Williams": arcade.color.LIGHT_BLUE,
     "AlphaTauri": arcade.color.WHITE,
     "Alfa Romeo": arcade.color.MAROON,
-    "Haas": arcade.color.GRAY,
+    "Haas F1 Team": arcade.color.GRAY,
 }
 
 
-def get_team_color(team_name: str):
-    return TEAM_COLORS.get(team_name, arcade.color.YELLOW)
+def get_team_color(team: str):
+    """Get the color for a team, defaulting to white if not found."""
+    return TEAM_COLORS.get(team, arcade.color.WHITE)
+
+
+def format_race_time(ms: int) -> str:
+    """
+    Format milliseconds into HH:MM:SS.
+    Example: 01:12:34
+    """
+    total_seconds = ms // 1000
+
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"

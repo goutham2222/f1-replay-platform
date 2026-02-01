@@ -1,4 +1,4 @@
 from app.services.simulation_clock import SimulationClock
 
-# Singleton clock instance shared across API
+# Single global clock instance (authoritative)
 clock = SimulationClock()

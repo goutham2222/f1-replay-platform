@@ -1,30 +1,39 @@
+from typing import List
+
+from app.services.telemetry_position_builder import TelemetryPositionBuilder
+
+
 class LapStateBuilder:
-    def __init__(self, lap_times_df):
-        self.df = lap_times_df
+    """
+    Thin wrapper that adapts TelemetryPositionBuilder output
+    into API driver_states.
+    """
 
-    def build(self, replay_time_ms: int):
-        driver_states = []
+    def __init__(self, curated_bucket: str, season: int, round: int):
+        self.telemetry = TelemetryPositionBuilder(
+            curated_bucket=curated_bucket,
+            season=season,
+            round=round,
+        )
 
-        for driver_id, group in self.df.groupby("driver_id"):
-            group = group.sort_values("lap_number")
+    def build_pre_race(self, drivers: list[dict]) -> List[dict]:
+        """
+        Before race start, no positions yet.
+        """
+        return []
 
-            cumulative = group["lap_time_ms"].cumsum()
-            completed = cumulative[cumulative <= replay_time_ms]
+    def build_race_state(self, time_ms: int) -> List[dict]:
+        """
+        Build driver positions at replay time.
+        """
+        states = []
 
-            if completed.empty:
-                current_lap = 0
-                last_lap_time = None
-            else:
-                idx = completed.index[-1]
-                current_lap = group.loc[idx, "lap_number"]
-                last_lap_time = group.loc[idx, "lap_time_ms"]
-
-            driver_states.append({
-                "driver_id": driver_id,
-                "current_lap": int(current_lap),
-                "last_completed_lap_time_ms": (
-                    int(last_lap_time) if last_lap_time is not None else None
-                )
+        for pos in self.telemetry.build(time_ms):
+            states.append({
+                "driver_id": str(pos["driver_number"]),
+                "driver_number": pos["driver_number"],
+                "x": pos["x"],
+                "y": pos["y"],
             })
 
-        return driver_states
+        return states

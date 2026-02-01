@@ -1,7 +1,14 @@
-from fastapi import APIRouter, HTTPException
+# app/api/clock.py
+
+from fastapi import APIRouter, Query
 from app.services.clock_registry import clock
 
 router = APIRouter(prefix="/clock")
+
+
+@router.get("/state")
+def get_state():
+    return clock.snapshot()
 
 
 @router.post("/play")
@@ -22,43 +29,25 @@ def reset():
     return clock.snapshot()
 
 
-@router.post("/seek")
-def seek(time_ms: int):
-    try:
-        clock.seek(time_ms)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return clock.snapshot()
-
-
-@router.post("/advance")
-def advance(ms: int):
-    try:
-        clock.advance(ms)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return clock.snapshot()
-
-
-@router.post("/speed")
-def set_speed(speed: float):
-    try:
-        clock.set_speed(speed)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return clock.snapshot()
-
-
 @router.post("/tick")
-def tick(base_ms: int = 1000):
-    """
-    Deterministic auto-advance step.
-    UI or tests call this repeatedly.
-    """
+def tick(base_ms: int = Query(1000, ge=1)):
     clock.tick(base_ms)
     return clock.snapshot()
 
 
-@router.get("/state")
-def state():
+@router.post("/seek")
+def seek(target_time_ms: int = Query(..., ge=0)):
+    clock.seek(target_time_ms)
+    return clock.snapshot()
+
+
+@router.post("/seek/next-lap")
+def next_lap():
+    clock.seek_next_lap()
+    return clock.snapshot()
+
+
+@router.post("/seek/previous-lap")
+def previous_lap():
+    clock.seek_previous_lap()
     return clock.snapshot()

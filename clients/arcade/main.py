@@ -1,134 +1,228 @@
 import arcade
 
-from clients.arcade.config import settings
+from clients.arcade.replay_api_client import ReplayAPIClient
 from clients.arcade.track import TrackRenderer
 from clients.arcade.driver import DriverDot
-from clients.arcade.replay_api_client import ReplayAPIClient
 from clients.arcade.colors import get_team_color
+from clients.arcade.config import settings
+from clients.arcade.selector import ReplaySelector
+
+BACKGROUND_COLOR = arcade.color.BLACK
+TARGET_FPS = 60
+SEEK_DELTA_MS = 5_000
 
 
-class ArcadeClient(arcade.Window):
-    TICK_FPS = 30
-    SEEK_MS = 5_000
-
-    def __init__(self, track_renderer: TrackRenderer):
-        # Correct, version-safe way to get screen size
-        screen_width, screen_height = arcade.get_display_size()
-
+class F1ReplayApp(arcade.Window):
+    def __init__(self):
         super().__init__(
-            width=screen_width,
-            height=screen_height,
-            title=settings.WINDOW_TITLE,
-            resizable=True,
+            settings.WINDOW_WIDTH,
+            settings.WINDOW_HEIGHT,
+            settings.WINDOW_TITLE,
+            update_rate=1 / TARGET_FPS,
         )
 
-        arcade.set_background_color(arcade.color.BLACK)
+        arcade.set_background_color(BACKGROUND_COLOR)
 
-        self.track_renderer = track_renderer
+        self.selector = ReplaySelector()
         self.api = ReplayAPIClient(settings.REPLAY_API_BASE_URL)
 
-        self.drivers: dict[str, DriverDot] = {}
-        self.replay_time_ms: int = 0
-        self.playing: bool = True
+        self.backend_ready = False
+        self.backend_init_attempted = False
 
+        self.track_renderer = TrackRenderer()
+        self.track_renderer.load_from_s3(
+            settings.CURATED_BUCKET,
+            settings.SEASON,
+            settings.ROUND,
+        )
         self.track_renderer.fit_to_view(self.width, self.height)
 
-        arcade.schedule(self._tick_replay, 1 / self.TICK_FPS)
+        self.drivers = {}
 
-    # ---------------------------------
-    # Replay clock
-    # ---------------------------------
-    def _tick_replay(self, _dt: float):
-        if not self.playing:
+        # Cached API state
+        self.clock_state = None
+
+        # CLIENT INTENT (authoritative for ticking)
+        self.client_playing = False
+
+        self.ui_race_time_hms = "00:00:00"
+        self.last_api_error = None
+
+    # ==========================================================
+    # Update (INTENT-DRIVEN, SAFE)
+    # ==========================================================
+    def on_update(self, delta_time: float):
+        if self.selector.active:
             return
 
-        self.api.tick()
-        clock = self.api.get_clock_state()
-        self.replay_time_ms = clock["current_time_ms"]
+        if not self.backend_ready:
+            self._init_backend()
+            return
 
-    # ---------------------------------
-    # Input (ESC does nothing)
-    # ---------------------------------
-    def on_key_press(self, symbol: int, modifiers: int):
-        if symbol == arcade.key.SPACE:
-            self.playing = not self.playing
+        try:
+            # Always fetch state
+            self.clock_state = self.api.get_clock_state()
+            self.ui_race_time_hms = self.clock_state["current_time_hms"]
 
-        elif symbol == arcade.key.LEFT:
-            clock = self.api.get_clock_state()
-            target = max(0, clock["current_time_ms"] - self.SEEK_MS)
-            self.api.seek(target)
-            self.replay_time_ms = target
+            # Advance time ONLY if client says playing
+            if self.client_playing:
+                delta_ms = int(delta_time * 1000)
+                if delta_ms > 0:
+                    self.api.tick(delta_ms)
+                    self.clock_state = self.api.get_clock_state()
 
-        elif symbol == arcade.key.RIGHT:
-            clock = self.api.get_clock_state()
-            target = clock["current_time_ms"] + self.SEEK_MS
-            self.api.seek(target)
-            self.replay_time_ms = target
+            frame = self.api.get_frame()
 
-        elif symbol == arcade.key.R:
+            for d in frame.get("driver_states", []):
+                driver_id = d["driver_id"]
+                team = d.get("team", "Unknown")
+
+                if driver_id not in self.drivers:
+                    self.drivers[driver_id] = DriverDot(
+                        color=get_team_color(team)
+                    )
+
+                sx, sy = self.track_renderer.to_screen(d["x"], d["y"])
+                self.drivers[driver_id].update(
+                    sx,
+                    sy,
+                    self.clock_state["current_time_ms"],
+                )
+
+            self.last_api_error = None
+
+        except Exception as e:
+            self.last_api_error = str(e)
+
+    def _init_backend(self):
+        if self.backend_init_attempted:
+            return
+
+        self.backend_init_attempted = True
+        try:
             self.api.reset()
-            self.replay_time_ms = 0
+            self.client_playing = False
+            self.backend_ready = True
+            self.last_api_error = None
+        except Exception as e:
+            self.last_api_error = str(e)
+            self.backend_init_attempted = False
 
-    # ---------------------------------
-    # Rendering
-    # ---------------------------------
+    # ==========================================================
+    # Draw
+    # ==========================================================
     def on_draw(self):
-        arcade.start_render()
-        self._draw_hud()
+        self.clear()
+
+        if self.selector.active:
+            self.selector.draw(self.width, self.height)
+            return
+
         self.track_renderer.draw()
-        self._draw_drivers()
-        self._draw_controls()
+
+        render_time_ms = (
+            self.clock_state["current_time_ms"]
+            if self.clock_state
+            else 0
+        )
+
+        for driver in self.drivers.values():
+            driver.draw(render_time_ms)
+
+        self._draw_hud()
 
     def _draw_hud(self):
         arcade.draw_text(
-            f"replay_time_ms: {self.replay_time_ms}",
+            f"time: {self.ui_race_time_hms}",
             20,
             self.height - 40,
             arcade.color.WHITE,
-            16,
+            18,
         )
+
+        phase = (
+            self.clock_state.get("phase", "UNKNOWN")
+            if self.clock_state
+            else "CONNECTING..."
+        )
+
         arcade.draw_text(
-            f"state: {'PLAYING' if self.playing else 'PAUSED'}",
+            f"phase: {phase}",
             20,
-            self.height - 65,
+            self.height - 70,
             arcade.color.YELLOW,
             14,
         )
 
-    def _draw_controls(self):
-        y = 60
-        arcade.draw_text("[SPACE] Play / Pause", 20, y, arcade.color.GRAY, 12)
-        arcade.draw_text("[← / →] Seek", 20, y - 18, arcade.color.GRAY, 12)
-        arcade.draw_text("[R] Reset", 20, y - 36, arcade.color.GRAY, 12)
+        if self.last_api_error:
+            arcade.draw_text(
+                f"API error: {self.last_api_error}",
+                20,
+                self.height - 95,
+                arcade.color.RED,
+                12,
+            )
 
-    def _draw_drivers(self):
-        frame = self.api.get_frame()
+        arcade.draw_text(
+            "[SPACE] Play/Pause   [←/→] Seek ±5s   [R] Reset",
+            20,
+            30,
+            arcade.color.GRAY,
+            12,
+        )
 
-        for d in frame.get("driver_states", []):
-            driver_id = d["driver_id"]
-            team = d.get("team", "Unknown")
+    # ==========================================================
+    # Input (IMMEDIATE INTENT)
+    # ==========================================================
+    def on_key_press(self, symbol: int, modifiers: int):
+        if self.selector.active:
+            self.selector.on_key(symbol)
+            if not self.selector.active:
+                self._start_selected_race()
+            return
 
-            if driver_id not in self.drivers:
-                self.drivers[driver_id] = DriverDot(get_team_color(team))
+        if not self.backend_ready:
+            return
 
-            sx, sy = self.track_renderer.to_screen(d["x"], d["y"])
-            self.drivers[driver_id].update(sx, sy)
-            self.drivers[driver_id].draw(alpha=1.0)
+        if symbol == arcade.key.SPACE:
+            if self.client_playing:
+                self.api.pause()
+                self.client_playing = False
+            else:
+                self.api.play()
+                self.client_playing = True
 
-    def on_resize(self, width: float, height: float):
-        super().on_resize(width, height)
-        self.track_renderer.fit_to_view(width, height)
+        elif symbol == arcade.key.R:
+            self.api.reset()
+            self.client_playing = False
+            self.drivers.clear()
+
+        elif symbol == arcade.key.RIGHT:
+            self.api.seek(
+                self.clock_state["current_time_ms"] + SEEK_DELTA_MS
+            )
+            self.drivers.clear()
+
+        elif symbol == arcade.key.LEFT:
+            self.api.seek(
+                max(
+                    0,
+                    self.clock_state["current_time_ms"] - SEEK_DELTA_MS
+                )
+            )
+            self.drivers.clear()
+
+    def _start_selected_race(self):
+        self.backend_ready = False
+        self.backend_init_attempted = False
+        self.client_playing = False
+        self.drivers.clear()
+        self.clock_state = None
+        self.ui_race_time_hms = "00:00:00"
 
 
 def main():
-    track = TrackRenderer()
-    track.load_from_s3(
-        bucket=settings.CURATED_BUCKET,
-        season=settings.SEASON,
-        round_=settings.ROUND,
-    )
-
-    ArcadeClient(track)
+    app = F1ReplayApp()
     arcade.run()
 
 

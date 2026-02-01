@@ -1,76 +1,51 @@
-from enum import Enum
-
-
-class ClockState(str, Enum):
-    PLAYING = "playing"
-    PAUSED = "paused"
-
-
 class SimulationClock:
-    """
-    Deterministic simulation clock.
-    Time advances only via controlled ticks or explicit calls.
-    """
+    def __init__(self, phase_resolver=None):
+        self.phase_resolver = phase_resolver
+        self.current_time_ms = 0
+        self.playing = False
+        self.phase = "PRE_RACE"
 
-    def __init__(self):
-        self.current_time_ms: int = 0
-        self.state: ClockState = ClockState.PAUSED
-        self.speed: float = 1.0  # playback multiplier
-
-    # ----------------------------
-    # State controls
-    # ----------------------------
     def play(self):
-        self.state = ClockState.PLAYING
+        self.playing = True
 
     def pause(self):
-        self.state = ClockState.PAUSED
+        self.playing = False
 
     def reset(self):
         self.current_time_ms = 0
-        self.state = ClockState.PAUSED
-        self.speed = 1.0
-        return self.current_time_ms
+        self.phase = "PRE_RACE"
+        self.playing = False
 
-    # ----------------------------
-    # Time controls
-    # ----------------------------
-    def seek(self, ms: int):
-        if ms < 0:
-            raise ValueError("Simulation time cannot be negative")
-        self.current_time_ms = ms
-        return self.current_time_ms
+    def seek(self, target_time_ms: int):
+        self.current_time_ms = max(0, target_time_ms)
 
-    def advance(self, ms: int):
-        if ms < 0:
-            raise ValueError("Cannot advance by negative milliseconds")
-        self.current_time_ms += ms
-        return self.current_time_ms
+        if self.phase_resolver:
+            self.phase = self.phase_resolver.resolve_phase(
+                self.current_time_ms
+            )
 
-    def set_speed(self, speed: float):
-        if speed <= 0:
-            raise ValueError("Speed must be > 0")
-        self.speed = speed
+        self.playing = True
 
-    # ----------------------------
-    # Auto-advance tick
-    # ----------------------------
-    def tick(self, base_ms: int = 1000):
-        """
-        Advance time if clock is playing.
-        Deterministic: no wall clock usage.
-        """
-        if self.state == ClockState.PLAYING:
-            self.current_time_ms += int(base_ms * self.speed)
+    def tick(self, delta_ms: int):
+        if not self.playing:
+            return
 
-        return self.current_time_ms
+        self.current_time_ms += delta_ms
 
-    # ----------------------------
-    # Snapshot
-    # ----------------------------
-    def snapshot(self) -> dict:
+        if self.phase_resolver:
+            self.phase = self.phase_resolver.resolve_phase(
+                self.current_time_ms
+            )
+
+    def snapshot(self):
+        total_seconds = self.current_time_ms // 1000
+        h = total_seconds // 3600
+        m = (total_seconds % 3600) // 60
+        s = total_seconds % 60
+
         return {
             "current_time_ms": self.current_time_ms,
-            "state": self.state,
-            "speed": self.speed,
+            "current_time_hms": f"{h:02d}:{m:02d}:{s:02d}",
+            "playing": self.playing,
+            "phase": self.phase,
         }

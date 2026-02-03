@@ -61,8 +61,8 @@ class MetadataLoader:
 
         return df[
             [
-                "driver_id",
                 "driver_number",
+                "driver_code",
                 "driver_name",
                 "team_name",
             ]

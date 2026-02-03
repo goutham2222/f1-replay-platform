@@ -4,10 +4,16 @@ from app.storage.parquet_reader import (
     ParquetReader,
     S3PartitionNotFound,
 )
-from app.services.phase_resolver import LapWindow
 
 
 class MetadataLoader:
+    """
+    Loads curated metadata from S3.
+    TELEMETRY-ONLY MODE:
+    - No lap windows
+    - No phase resolution
+    """
+
     def __init__(self, curated_bucket: str, season: int, round: int):
         self.curated_bucket = curated_bucket
         self.season = season
@@ -39,7 +45,7 @@ class MetadataLoader:
         return race.iloc[0].to_dict()
 
     # --------------------------------------------------
-    # Drivers
+    # Drivers (USED for names + team colors)
     # --------------------------------------------------
     def load_drivers(self):
         try:
@@ -54,13 +60,18 @@ class MetadataLoader:
             ) from e
 
         return df[
-            ["driver_id", "driver_number", "driver_name", "team_name"]
+            [
+                "driver_id",
+                "driver_number",
+                "driver_name",
+                "team_name",
+            ]
         ]
 
     # --------------------------------------------------
-    # NEW: Lap windows
+    # Lap times (optional, KEEP for future features)
     # --------------------------------------------------
-    def load_lap_windows(self):
+    def load_lap_times(self) -> list[dict]:
         try:
             df = self.reader.read_partitioned_table(
                 bucket=self.curated_bucket,
@@ -73,27 +84,61 @@ class MetadataLoader:
                 f"Lap times not found for season={self.season}, round={self.round}"
             ) from e
 
-        # Aggregate per lap
-        grouped = (
-            df.groupby("lap_number")
-            .agg(
-                start_ms=("lap_start_time_ms", "min"),
-                finish_ms=("lap_finish_time_ms", "max"),
+        required = {
+            "driver_id",
+            "lap_number",
+            "lap_start_time_ms",
+            "lap_finish_time_ms",
+        }
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"Missing lap time columns: {missing}")
+
+        return df[
+            [
+                "driver_id",
+                "lap_number",
+                "lap_start_time_ms",
+                "lap_finish_time_ms",
+            ]
+        ].to_dict(orient="records")
+
+    # --------------------------------------------------
+    # Track geometry
+    # --------------------------------------------------
+    def load_track_centerline(self):
+        try:
+            df = self.reader.read_partitioned_table(
+                bucket=self.curated_bucket,
+                dataset="track_centerline",
+                season=self.season,
+                round=self.round,
             )
-            .reset_index()
-            .sort_values("lap_number")
-        )
+        except S3PartitionNotFound:
+            # TEMP fallback
+            return self._load_placeholder_centerline()
 
-        lap_windows = [
-            LapWindow(
-                lap_number=int(row.lap_number),
-                start_ms=int(row.start_ms),
-                finish_ms=int(row.finish_ms),
+        required = {"x", "y"}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(
+                f"Missing track centerline columns: {missing}"
             )
-            for row in grouped.itertuples(index=False)
-        ]
 
-        if not lap_windows:
-            raise ValueError("No lap windows generated")
+        return list(zip(df["x"].astype(float), df["y"].astype(float)))
 
-        return lap_windows
+    # --------------------------------------------------
+    # Placeholder fallback
+    # --------------------------------------------------
+    def _load_placeholder_centerline(self):
+        import math
+
+        points = []
+        radius = 1000
+        for i in range(360):
+            angle = math.radians(i)
+            x = radius * math.cos(angle)
+            y = radius * math.sin(angle)
+            points.append((x, y))
+
+        return points

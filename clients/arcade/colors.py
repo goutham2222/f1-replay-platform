@@ -5,12 +5,12 @@ TEAM_COLORS = {
     "Ferrari": arcade.color.RED,
     "Mercedes": arcade.color.SILVER,
     "McLaren": arcade.color.ORANGE,
-    "Aston Martin": arcade.color.DARK_GREEN,
+    "Aston Martin": arcade.color.LIGHT_GREEN,
     "Alpine": arcade.color.BLUE,
     "Williams": arcade.color.LIGHT_BLUE,
     "AlphaTauri": arcade.color.WHITE,
     "Alfa Romeo": arcade.color.MAROON,
-    "Haas F1 Team": arcade.color.GRAY,
+    "Haas F1 Team": arcade.color.GRAY,  
 }
 
 

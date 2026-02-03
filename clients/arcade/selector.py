@@ -1,87 +1,157 @@
 import arcade
 
 
+class Dropdown:
+    def __init__(self, label: str, options: list, selected_idx: int = 0):
+        self.label = label
+        self.options = options
+        self.selected_idx = selected_idx
+        self.open = False
+
+    @property
+    def value(self):
+        return self.options[self.selected_idx]
+
+    def move(self, delta: int):
+        self.selected_idx = (self.selected_idx + delta) % len(self.options)
+
+
 class ReplaySelector:
     def __init__(self):
         self.active = True
 
-        self.seasons = [2023]
-        self.rounds = list(range(1, 23))
-        self.sessions = ["RACE"]
+        self.dropdowns = [
+            Dropdown("Season", [2023]),
+            Dropdown("Round", list(range(1, 23))),
+            Dropdown("Session", ["RACE"]),
+        ]
 
-        self.season_idx = 0
-        self.round_idx = 0
-        self.session_idx = 0
+        self.cursor = 0  # which dropdown / button is focused
+        self.start_idx = len(self.dropdowns)  # START button index
 
-        self.cursor = 0  # 0=season, 1=round, 2=session
-
+    # --------------------------------------------------
+    # Selected values
+    # --------------------------------------------------
     @property
     def season(self):
-        return self.seasons[self.season_idx]
+        return self.dropdowns[0].value
 
     @property
     def round(self):
-        return self.rounds[self.round_idx]
+        return self.dropdowns[1].value
 
     @property
     def session(self):
-        return self.sessions[self.session_idx]
+        return self.dropdowns[2].value
 
+    # --------------------------------------------------
+    # Input
+    # --------------------------------------------------
     def on_key(self, symbol):
+        current = (
+            self.dropdowns[self.cursor]
+            if self.cursor < self.start_idx
+            else None
+        )
+
+        # -------------------------------
+        # Dropdown open
+        # -------------------------------
+        if current and current.open:
+            if symbol == arcade.key.UP:
+                current.move(-1)
+            elif symbol == arcade.key.DOWN:
+                current.move(1)
+            elif symbol in (arcade.key.ENTER, arcade.key.ESCAPE):
+                current.open = False
+            return
+
+        # -------------------------------
+        # Navigation
+        # -------------------------------
         if symbol == arcade.key.UP:
-            self.cursor = (self.cursor - 1) % 3
+            self.cursor = (self.cursor - 1) % (self.start_idx + 1)
 
         elif symbol == arcade.key.DOWN:
-            self.cursor = (self.cursor + 1) % 3
-
-        elif symbol == arcade.key.LEFT:
-            self._change(-1)
-
-        elif symbol == arcade.key.RIGHT:
-            self._change(1)
+            self.cursor = (self.cursor + 1) % (self.start_idx + 1)
 
         elif symbol == arcade.key.ENTER:
-            self.active = False
+            if self.cursor == self.start_idx:
+                self.active = False  # START
+            else:
+                current.open = True
 
-    def _change(self, delta):
-        if self.cursor == 0:
-            self.season_idx = (self.season_idx + delta) % len(self.seasons)
-        elif self.cursor == 1:
-            self.round_idx = (self.round_idx + delta) % len(self.rounds)
-        elif self.cursor == 2:
-            self.session_idx = (self.session_idx + delta) % len(self.sessions)
-
+    # --------------------------------------------------
+    # Draw
+    # --------------------------------------------------
     def draw(self, width, height):
+        center_x = width / 2
+        start_y = height - 140
+
         arcade.draw_text(
             "F1 REPLAY SELECTOR",
-            width / 2,
-            height - 120,
+            center_x,
+            start_y + 60,
             arcade.color.WHITE,
             28,
             anchor_x="center",
         )
 
-        lines = [
-            f"Season: {self.season}",
-            f"Round: {self.round}",
-            f"Session: {self.session}",
-        ]
+        for idx, dropdown in enumerate(self.dropdowns):
+            y = start_y - idx * 50
+            focused = idx == self.cursor
 
-        for i, text in enumerate(lines):
-            color = arcade.color.YELLOW if i == self.cursor else arcade.color.GRAY
+            label_color = (
+                arcade.color.YELLOW if focused else arcade.color.GRAY
+            )
+
             arcade.draw_text(
-                text,
-                width / 2,
-                height - 200 - i * 40,
-                color,
+                f"{dropdown.label}: {dropdown.value}",
+                center_x,
+                y,
+                label_color,
                 18,
                 anchor_x="center",
             )
 
+            if dropdown.open:
+                for i, opt in enumerate(dropdown.options):
+                    oy = y - 30 - i * 22
+                    color = (
+                        arcade.color.WHITE
+                        if i == dropdown.selected_idx
+                        else arcade.color.LIGHT_GRAY
+                    )
+                    arcade.draw_text(
+                        f"- {opt}",
+                        center_x,
+                        oy,
+                        color,
+                        14,
+                        anchor_x="center",
+                    )
+
+        # START button
+        start_y_btn = start_y - self.start_idx * 50
+        start_color = (
+            arcade.color.GREEN
+            if self.cursor == self.start_idx
+            else arcade.color.GRAY
+        )
+
         arcade.draw_text(
-            "↑↓ Select   ←→ Change   ENTER Start",
-            width / 2,
-            60,
+            "START",
+            center_x,
+            start_y_btn,
+            start_color,
+            20,
+            anchor_x="center",
+        )
+
+        arcade.draw_text(
+            "↑↓ Navigate   ENTER Select   ESC Close",
+            center_x,
+            50,
             arcade.color.LIGHT_GRAY,
             14,
             anchor_x="center",

@@ -24,36 +24,39 @@ class F1ReplayApp(arcade.Window):
 
         arcade.set_background_color(BACKGROUND_COLOR)
 
+        # --------------------------------------------------
+        # Selector
+        # --------------------------------------------------
         self.selector = ReplaySelector()
+
+        # --------------------------------------------------
+        # API + renderers
+        # --------------------------------------------------
         self.api = ReplayAPIClient(settings.REPLAY_API_BASE_URL)
+        self.track_renderer = TrackRenderer()
 
         self.backend_ready = False
         self.backend_init_attempted = False
 
-        self.track_renderer = TrackRenderer()
-        self.track_renderer.load_from_s3(
-            settings.CURATED_BUCKET,
-            settings.SEASON,
-            settings.ROUND,
-        )
-        self.track_renderer.fit_to_view(self.width, self.height)
-
         self.drivers = {}
+        self.leaderboard = LeaderboardRenderer()
 
-        # Cached API state
+        # --------------------------------------------------
+        # Clock + playback state
+        # --------------------------------------------------
         self.clock_state = None
-
-        # CLIENT INTENT (authoritative for ticking)
         self.client_playing = False
 
-        # Leaderboard (render-only)
-        self.leaderboard = LeaderboardRenderer()
+        # 🔥 PLAYBACK SPEED (CLIENT-ONLY)
+        # 1.0 = real time
+        # 4.0 = 4x speed (recommended default)
+        self.playback_speed = 4.0
 
         self.ui_race_time_hms = "00:00:00"
         self.last_api_error = None
 
     # ==========================================================
-    # Update (UNCHANGED CONTROL FLOW)
+    # Update
     # ==========================================================
     def on_update(self, delta_time: float):
         if self.selector.active:
@@ -64,34 +67,59 @@ class F1ReplayApp(arcade.Window):
             return
 
         try:
+            # ------------------------------
+            # CLOCK STATE
+            # ------------------------------
             self.clock_state = self.api.get_clock_state()
+
+            if not self.clock_state:
+                return
+
             self.ui_race_time_hms = self.clock_state["current_time_hms"]
 
-            # Advance time ONLY if client says playing
+            # ------------------------------
+            # TICK CLOCK (SCALED)
+            # ------------------------------
             if self.client_playing:
-                delta_ms = int(delta_time * 1000)
+                delta_ms = int(delta_time * 1000 * self.playback_speed)
+
                 if delta_ms > 0:
                     self.api.tick(delta_ms)
                     self.clock_state = self.api.get_clock_state()
 
+            # ------------------------------
+            # FRAME FETCH
+            # ------------------------------
             frame = self.api.get_frame()
+            driver_states = frame.get("driver_states", [])
 
-            # 🔹 Leaderboard update (frame-only)
+            if not driver_states:
+                return
+
+            # ------------------------------
+            # LEADERBOARD
+            # ------------------------------
             self.leaderboard.update_from_frame(
-                frame.get("driver_states", []),
+                driver_states,
                 self.clock_state["current_time_ms"],
             )
 
-            for d in frame.get("driver_states", []):
+            # ------------------------------
+            # DRIVERS
+            # ------------------------------
+            for d in driver_states:
                 driver_id = d["driver_id"]
                 team = d.get("team", "Unknown")
+                x = d["x"]
+                y = d["y"]
 
                 if driver_id not in self.drivers:
                     self.drivers[driver_id] = DriverDot(
                         color=get_team_color(team)
                     )
 
-                sx, sy = self.track_renderer.to_screen(d["x"], d["y"])
+                sx, sy = self.track_renderer.to_screen(x, y)
+
                 self.drivers[driver_id].update(
                     sx,
                     sy,
@@ -101,18 +129,22 @@ class F1ReplayApp(arcade.Window):
             self.last_api_error = None
 
         except Exception as e:
+            print("[ERROR] on_update:", e)
             self.last_api_error = str(e)
 
+    # ==========================================================
+    # Backend init
+    # ==========================================================
     def _init_backend(self):
         if self.backend_init_attempted:
             return
 
         self.backend_init_attempted = True
+
         try:
             self.api.reset()
             self.client_playing = False
             self.backend_ready = True
-            self.last_api_error = None
         except Exception as e:
             self.last_api_error = str(e)
             self.backend_init_attempted = False
@@ -163,30 +195,29 @@ class F1ReplayApp(arcade.Window):
             14,
         )
 
-        # 🔹 Leaderboard (right side)
+        arcade.draw_text(
+            f"speed: {self.playback_speed:.1f}x",
+            20,
+            self.height - 100,
+            arcade.color.CYAN,
+            14,
+        )
+
         self.leaderboard.draw(
             x=self.width - 420,
             y=self.height - 80,
         )
 
-        if self.last_api_error:
-            arcade.draw_text(
-                f"API error: {self.last_api_error}",
-                20,
-                self.height - 95,
-                arcade.color.RED,
-                12,
-            )
-
         arcade.draw_text(
-            "[SPACE] Play/Pause   [←/→] Seek ±5s   [R] Reset",
+            "[SPACE] Play/Pause   [←/→] Seek ±5s   [ / ] Speed   [R] Reset",
             20,
             30,
             arcade.color.GRAY,
             12,
         )
+
     # ==========================================================
-    # Input (UNCHANGED)
+    # Input
     # ==========================================================
     def on_key_press(self, symbol: int, modifiers: int):
         if self.selector.active:
@@ -226,13 +257,42 @@ class F1ReplayApp(arcade.Window):
             )
             self.drivers.clear()
 
+        # 🔥 SPEED CONTROLS
+        elif symbol == arcade.key.BRACKETRIGHT:
+            self.playback_speed = min(self.playback_speed * 2, 32.0)
+
+        elif symbol == arcade.key.BRACKETLEFT:
+            self.playback_speed = max(self.playback_speed / 2, 0.25)
+
+    # ==========================================================
+    # Selection → backend wiring
+    # ==========================================================
     def _start_selected_race(self):
+        # Reset frontend state
         self.backend_ready = False
         self.backend_init_attempted = False
         self.client_playing = False
+        self.playback_speed = 4.0
         self.drivers.clear()
         self.clock_state = None
         self.ui_race_time_hms = "00:00:00"
+
+        # Store selection (for future use)
+        self.selected_season = self.selector.season
+        self.selected_round = self.selector.round
+        self.selected_session = self.selector.session
+
+        # Reload track for selected race
+        self.track_renderer = TrackRenderer()
+        self.track_renderer.load_from_s3(
+            settings.CURATED_BUCKET,
+            self.selected_season,
+            self.selected_round,
+        )
+        self.track_renderer.fit_to_view(self.width, self.height)
+
+        # ✅ Recreate API client (NO extra params)
+        self.api = ReplayAPIClient(settings.REPLAY_API_BASE_URL)
 
 
 def main():

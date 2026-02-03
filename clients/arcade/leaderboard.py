@@ -2,27 +2,10 @@ import arcade
 from clients.arcade.driver_status import resolve_driver_status
 
 
-# --------------------------------------------------
-# Placeholder driver names (client-only)
-# --------------------------------------------------
-DRIVER_NAME_MAP = {
-    "1": "Max Verstappen",
-    "11": "Sergio Perez",
-    "16": "Charles Leclerc",
-    "55": "Carlos Sainz",
-    "44": "Lewis Hamilton",
-    "63": "George Russell",
-}
-
-DEFAULT_STATUS = "Racing"
-
-
 class LeaderboardRenderer:
     """
     Render-only leaderboard.
-    No API calls.
-    No clock access.
-    No logic.
+    Data is fully driven by backend frame.
     """
 
     def __init__(self):
@@ -30,19 +13,15 @@ class LeaderboardRenderer:
 
     def update_from_frame(self, driver_states: list[dict], time_ms: int):
         """
-        Preserve ordering exactly as provided by frame.
+        Preserve ordering exactly as provided by backend.
         """
         self.entries = []
 
         for idx, d in enumerate(driver_states, start=1):
-            driver_id = d["driver_id"]
-
             self.entries.append({
                 "position": idx,
-                "name": DRIVER_NAME_MAP.get(
-                    driver_id, f"Driver {driver_id}"
-                ),
-                "status": resolve_driver_status(driver_id, time_ms),
+                "name": d.get("driver_code", f"Driver {d['driver_id']}"),
+                "status": resolve_driver_status(d["driver_id"], time_ms),
             })
 
     def draw(self, x: int, y: int):

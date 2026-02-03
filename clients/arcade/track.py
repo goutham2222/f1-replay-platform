@@ -6,7 +6,9 @@ from clients.arcade.s3_track_loader import load_track_from_s3
 
 
 class TrackRenderer:
-    TRACK_HALF_WIDTH = 6
+    # 🔥 Wider track for better visibility
+    TRACK_HALF_WIDTH = 14
+
     UI_TOP_MARGIN = 120
     SIDE_PADDING = 60
     BOTTOM_PADDING = 60
@@ -14,8 +16,11 @@ class TrackRenderer:
     def __init__(self):
         self.points: List[Tuple[float, float]] = []
         self._transform = None
+
+        # Screen-space geometry
         self.inner: List[Tuple[float, float]] = []
         self.outer: List[Tuple[float, float]] = []
+        self.surface: List[Tuple[float, float]] = []
 
     # -------------------------
     # Data loading
@@ -54,7 +59,11 @@ class TrackRenderer:
         track_w = (max_x - min_x) * scale
         track_h = (max_y - min_y) * scale
 
-        offset_x = (drawable_w - track_w) / 2 - min_x * scale + self.SIDE_PADDING
+        offset_x = (
+            (drawable_w - track_w) / 2
+            - min_x * scale
+            + self.SIDE_PADDING
+        )
         offset_y = (
             self.BOTTOM_PADDING
             + (drawable_h - track_h) / 2
@@ -86,6 +95,7 @@ class TrackRenderer:
             if length == 0:
                 continue
 
+            # Normal vector
             nx = -dy / length
             ny = dx / length
 
@@ -104,16 +114,19 @@ class TrackRenderer:
     # Rendering
     # -------------------------
     def draw(self):
-        if not self.inner:
+        if not self.inner or not self.outer:
             return
 
+        # 🧱 Outer boundary
         arcade.draw_line_strip(
             self.outer + [self.outer[0]],
             arcade.color.LIGHT_GRAY,
-            3,
+            4,
         )
+
+        # 🧱 Inner boundary
         arcade.draw_line_strip(
             self.inner + [self.inner[0]],
             arcade.color.GRAY,
-            3,
+            4,
         )
